@@ -1,28 +1,70 @@
-import json
-
-from fastapi import FastAPI, HTTPException
+import uvicorn
+from bson import ObjectId
+from pymongo import MongoClient
+from fastapi import FastAPI, HTTPException, Body
 from pydantic import BaseModel
 
 app = FastAPI()
+
+client = MongoClient("mongodb://localhost:27017")
+db = client["todoDB"]
+collection = db["todoCollection"]
 
 class Todo(BaseModel):
     name: str
     status: bool
 
-todo_list: list[Todo] = [Todo(name="Brush Teeth", status=True)]
+@app.get("/getAll", response_model=list[Todo])
+def get_all_todos():
+    cursor = collection.find({})
+    items: list[Todo] = []
+    for doc in cursor:
+        items.append(doc)
+    return items
 
 
-@app.get("/")
-async def read_root() -> list[Todo]:
-    return todo_list
+@app.get("/get/{todo_id}", response_model=Todo)
+def get_todo(todo_id: str):
+    todo = collection.find_one({"_id": ObjectId(todo_id)})
+    if not todo:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"name": todo["name"], "status": todo["status"]}
 
-
-@app.post("/add_todo")
-async def add_todo(todo: Todo) -> Todo | str:
-    if any(existing_todo.name.lower() == todo.name.lower() for existing_todo in todo_list):
-        raise HTTPException(status_code=403, detail="Error: todo already present")
-    todo.name = todo.name.title()
-    todo_list.append(todo)
-    with open('tasks.json', 'w') as _taskfd:
-        json.dump([todo.model_dump() for todo in todo_list], _taskfd)
+@app.post("/create", response_model=Todo)
+def create_todo(todo: Todo):
+    result = collection.insert_one(todo.model_dump())
     return todo
+
+@app.post("/createMany", response_model=list[Todo])
+def create_many_todos(todos: list[Todo]):
+    result = collection.insert_many([todo.model_dump() for todo in todos])
+    return todos
+
+@app.put("/update/{todo_id}", response_model=Todo)
+def update_todo(todo_id: str, todo: Todo):
+    result = collection.update_one({"_id": ObjectId(todo_id)}, {"$set": todo.model_dump()})
+    return todo
+
+@app.put("/updateMany", response_model=dict)
+def update_many( filter: dict = Body(..., embed=True), update: dict = Body(..., embed=True)):
+    result = collection.update_many(filter, {"$set": update})
+    return {
+        "matched_count": result.matched_count,
+        "modified_count": result.modified_count
+    }
+
+@app.delete("/delete/{todo_id}", response_model=dict)
+def delete_todo(todo_id: str):
+    result = collection.delete_one({"_id": ObjectId(todo_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Todo not found")
+    return {"deleted": todo_id}
+
+@app.delete("/deleteMany", response_model=dict)
+def delete_many_todos(ids: list[str]):
+    object_ids = [ObjectId(todo_id) for todo_id in ids]
+    result = collection.delete_many({"_id": {"$in": object_ids}})
+    return {"deleted_count": result.deleted_count}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)
